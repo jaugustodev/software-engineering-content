@@ -1,3 +1,0 @@
-# AWS
-
-- [Questions](./questions.md)
