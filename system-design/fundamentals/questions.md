@@ -84,59 +84,6 @@ graph TD
 
 ---
 
-## What is Monolithic Architecture vs Microservices? When to use each?
-
-### Monolithic
-
-All features run in a single deployable unit — one codebase, one process, one database.
-
-**When to use:**
-- Early-stage product (speed of development > scale)
-- Small team (< 10 engineers)
-- Domain is not well understood yet
-
-### Microservices
-
-Each feature/domain is an independent service with its own deployment and (often) its own database.
-
-**When to use:**
-- Different parts of the system need to scale independently
-- Teams are large and need autonomy
-- Services have very different reliability/latency requirements
-
-### Trade-offs
-
-| | Monolithic | Microservices |
-|--|------------|---------------|
-| Deployment | One artifact | Many artifacts |
-| Scalability | Scale everything | Scale per service |
-| Complexity | Low | High (networking, observability) |
-| Data | Single DB | DB per service |
-| Failure blast radius | High | Contained |
-| Team autonomy | Low | High |
-
-> **Connects to:** [Message Queue](#whats-message-queue) — microservices communicate asynchronously via queues. [API Gateway](#what-is-api-gateway-vs-load-balancer) — the single entry point for a microservice ecosystem.
-
-```mermaid
-graph TD
-    subgraph Monolithic
-        M[Single App] --> MDB[(Single DB)]
-    end
-
-    subgraph Microservices
-        GW[API Gateway] --> US[User Service]
-        GW --> TS[Tweet Service]
-        GW --> FS[Feed Service]
-        US --> UDB[(User DB)]
-        TS --> TDB[(Tweet DB)]
-        TS --> MQ[[Message Queue]]
-        MQ --> FS
-        FS --> FDB[(Feed DB)]
-    end
-```
-
----
-
 ## What is Scalability?
 
 The ability of a system to handle increasing load — more users, more requests, more data — without degrading performance.
@@ -160,30 +107,100 @@ graph LR
 
 ---
 
-## What is API Gateway vs Load Balancer?
+## Vertical Scaling vs Horizontal Scaling
 
-Both sit in front of your services, but they serve different purposes.
+| | Vertical (Scale Up) | Horizontal (Scale Out) |
+|-|---------------------|------------------------|
+| How | Bigger machine (more CPU, RAM) | More machines |
+| Limit | Hardware ceiling | Virtually unlimited |
+| Cost | Expensive at high end | More predictable |
+| Downtime | Often requires restart | Zero downtime possible |
+| Complexity | Simple | Requires load balancer, distributed state |
 
-| | Load Balancer | API Gateway |
-|--|--------------|-------------|
-| Purpose | Distribute traffic evenly | Route, transform, and control API requests |
-| Layer | L4 (TCP) or L7 (HTTP) | L7 (HTTP/REST/gRPC) |
-| Features | Health checks, round robin | Auth, rate limiting, request routing, SSL termination |
-| Awareness | Which server? | Which endpoint/service? |
+> **Connects to:** [Load Balancer](#explain-load-balancer) — mandatory for horizontal scaling. [Sharding](#diff-between-sharding-and-replication) — databases need sharding when vertical scaling of the DB hits its ceiling. [Non-Functional Requirements](#what-is-functional-and-non-functional-requirements) — scale targets (100M DAU) determine which strategy to use.
 
-**Rule of thumb:** Load balancer = traffic distribution. API Gateway = smart front door for a microservice ecosystem.
+```mermaid
+graph TD
+    subgraph Vertical
+        V1[Server\n4 CPU / 16GB] --> V2[Server\n16 CPU / 64GB]
+    end
 
-> **Connects to:** [Microservices](#what-is-monolithic-architecture-vs-microservices) — API gateway is the standard entry point. [Load Balancer](#explain-load-balancer) for traffic distribution detail.
+    subgraph Horizontal
+        H[Load Balancer] --> H1[Server 1]
+        H --> H2[Server 2]
+        H --> H3[Server 3]
+    end
+```
+
+---
+
+## Explain Load Balancer
+
+Distributes incoming traffic across multiple servers to improve scalability and availability. Prevents any single server from being overwhelmed. If a server fails, the load balancer stops sending traffic to it.
+
+**Common algorithms:**
+- **Round Robin** — each server gets requests in turn
+- **Least Connections** — sends to the server with fewest active connections
+- **IP Hash** — same client always hits the same server (useful for session stickiness)
+
+> **Connects to:** [Scalability](#what-is-scalability) — horizontal scaling requires a load balancer. [Stateless vs Stateful](#stateless-vs-stateful) — stateless apps allow true round-robin without session pinning. [API Gateway](#what-is-api-gateway-vs-load-balancer) — gateway sits above the load balancer in a microservice stack.
 
 ```mermaid
 graph LR
-    Client --> GW[API Gateway\nAuth · Rate Limit · Routing]
-    GW --> LB1[Load Balancer]
-    GW --> LB2[Load Balancer]
-    LB1 --> US1[User Service]
-    LB1 --> US2[User Service]
-    LB2 --> TS1[Tweet Service]
-    LB2 --> TS2[Tweet Service]
+    Users -->|requests| LB[Load Balancer]
+    LB -->|round robin| S1[Server 1]
+    LB -->|round robin| S2[Server 2]
+    LB -->|round robin| S3[Server 3]
+    S1 & S2 & S3 --> DB[(Shared DB)]
+```
+
+---
+
+## Stateless vs Stateful
+
+| | Stateless | Stateful |
+|--|-----------|---------|
+| Session data | Not stored on server | Stored on server |
+| Scaling | Easy — any instance handles any request | Hard — client must hit same instance |
+| Failure recovery | Any replica takes over | Session lost if instance dies |
+| Example | REST APIs, CDN | WebSockets, game servers |
+
+**Making stateful systems stateless:** offload session state to an external store (Redis, DynamoDB). Each server reads from the store — no pinning required.
+
+> **Connects to:** [Load Balancer](#explain-load-balancer) — stateless apps allow true round-robin. [Cache](#what-is-cache) — Redis is the standard solution to externalize session state.
+
+```mermaid
+graph TD
+    subgraph Stateless
+        LB1[Load Balancer] --> A1[Server A]
+        LB1 --> B1[Server B]
+        A1 & B1 --> Redis[(Redis\nSession Store)]
+    end
+
+    subgraph Stateful - Problem
+        LB2[Load Balancer] -->|must pin| A2[Server A\nhas session]
+        LB2 -.->|breaks session| B2[Server B\nno session]
+    end
+```
+
+---
+
+## What is Redundancy?
+
+Having backups of critical components so the system never depends on a single point. If one fails, another takes over without downtime.
+
+**Example:** Two database instances running the same data. If the primary crashes, the secondary is already up-to-date and ready.
+
+> **Connects to:** [Failover](#what-is-failover) — redundancy makes failover possible. [Replication](#diff-between-sharding-and-replication) — the mechanism that keeps replicas in sync.
+
+```mermaid
+graph TD
+    Client --> LB[Load Balancer]
+    LB --> A[Server A]
+    LB --> B[Server B - backup]
+    A --> DB1[(Primary DB)]
+    B --> DB1
+    DB1 -- replication --> DB2[(Secondary DB - backup)]
 ```
 
 ---
@@ -227,165 +244,26 @@ graph TD
 
 ---
 
-## What's a Message Queue? Where should we use it?
+## What is Failover?
 
-A message queue is a buffer that decouples producers (who generate work) from consumers (who process it). Producers push messages; consumers pull and process at their own pace.
+The process where the system automatically switches from a failed component to its backup, with no manual intervention required.
 
-**When to use:**
-- **Async processing** — sending emails, generating thumbnails, notifications
-- **Traffic spike absorption** — queue fills up; consumers process steadily
-- **Microservice decoupling** — services don't call each other directly
-- **Guaranteed delivery** — messages persist until acknowledged
+**Example:** Primary database crashes → health check detects failure → traffic is rerouted to the secondary in seconds.
 
-**Examples:** SQS, Kafka, RabbitMQ
-
-> **Connects to:** [Microservices](#what-is-monolithic-architecture-vs-microservices) — primary communication mechanism between services. [Scalability](#what-is-scalability) — buffers bursts without overloading downstream services.
+> **Connects to:** [Redundancy](#what-is-redundancy) — requires redundant components to fail over to. [Multi-AZ](#multi-az-multi-availability-zone) — AZ-level failover uses DNS. [High Availability](#how-would-you-ensure-high-availability) — failover is a core HA mechanism.
 
 ```mermaid
 sequenceDiagram
-    participant API
-    participant Queue
-    participant Worker1
-    participant Worker2
+    participant App
+    participant Primary DB
+    participant Secondary DB
+    participant Health Check
 
-    API->>Queue: enqueue("send_email", payload)
-    API->>Queue: enqueue("resize_image", payload)
-    Note over API: API returns 202 immediately
-
-    Queue->>Worker1: dequeue task
-    Queue->>Worker2: dequeue task
-    Worker1-->>Queue: ack (done)
-    Worker2-->>Queue: ack (done)
-```
-
----
-
-## What is CDN? When should we use it?
-
-A **Content Delivery Network** is a geographically distributed network of edge servers that cache static content closer to users.
-
-**When to use:**
-- Serving static assets: images, JS, CSS, videos
-- Global user base with latency requirements
-- Reducing origin server load
-
-**How it works:** User requests an asset → CDN edge checks cache → if miss, fetches from origin and caches → subsequent users in the same region get cached response.
-
-> **Connects to:** [Cache](#what-is-cache) — CDN is effectively a geographically distributed cache layer. [Non-Functional Requirements](#what-is-functional-and-non-functional-requirements) — latency < 200ms often requires a CDN.
-
-```mermaid
-graph LR
-    US[User in São Paulo] -->|request| CDN_SA[CDN Edge\nSouth America]
-    EU[User in Berlin] -->|request| CDN_EU[CDN Edge\nEurope]
-    CDN_SA -->|cache miss| ORIGIN[Origin Server]
-    CDN_EU -->|cache miss| ORIGIN
-    CDN_SA -->|cache hit| US
-    CDN_EU -->|cache hit| EU
-```
-
----
-
-## Web Application Firewall (WAF)
-
-A WAF inspects HTTP traffic between clients and your web application, blocking malicious requests before they reach your servers.
-
-**What it protects against:**
-- SQL Injection
-- XSS (Cross-Site Scripting)
-- DDoS at the application layer (L7)
-- Bot scraping and credential stuffing
-
-**Where it sits:** Between the CDN/internet and your API Gateway or Load Balancer.
-
-> **Connects to:** [API Gateway](#what-is-api-gateway-vs-load-balancer) — WAF sits upstream of the gateway. [Non-Functional Requirements](#what-is-functional-and-non-functional-requirements) — security is a key non-functional requirement.
-
-```mermaid
-graph LR
-    Internet --> WAF[WAF\nBlocks malicious traffic]
-    WAF --> CDN[CDN]
-    CDN --> GW[API Gateway]
-    GW --> Services[Backend Services]
-```
-
----
-
-## DNS (Domain Name System)
-
-DNS translates human-readable domain names (e.g., `twitter.com`) into IP addresses that routers understand.
-
-**In system design, DNS also enables:**
-- **Failover routing** — route traffic to a secondary region if primary is down
-- **Latency-based routing** — send users to the nearest region
-- **Weighted routing** — canary deployments (e.g., 5% of traffic to new version)
-
-> **Connects to:** [Multi-AZ / High Availability](#how-would-you-ensure-high-availability) — DNS failover is the top-level switch for disaster recovery. [CDN](#what-is-cdn) — CDN edge resolution happens via DNS.
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant DNS
-    participant RegionA
-    participant RegionB
-
-    User->>DNS: resolve twitter.com
-    DNS->>DNS: health check RegionA → failed
-    DNS-->>User: IP of RegionB (failover)
-    User->>RegionB: request
-```
-
----
-
-## Multi-AZ (Multi Availability Zone)
-
-Deploying your infrastructure across multiple data centers (AZs) within a cloud region. If one AZ has a power outage or network failure, others remain unaffected.
-
-**Multi-AZ vs Multi-Region:**
-| | Multi-AZ | Multi-Region |
-|--|----------|-------------|
-| Scope | Same city/region | Different continents |
-| Latency between nodes | ~1-5ms | ~100ms+ |
-| Use case | High availability | Disaster recovery + global latency |
-| Cost | Medium | High |
-
-> **Connects to:** [Redundancy](#what-is-redundancy) and [Failover](#what-is-failover) — Multi-AZ is the physical implementation of redundancy. [DNS](#dns-domain-name-system) — DNS routes traffic away from a failed AZ/region.
-
-```mermaid
-graph TD
-    DNS[Route 53 / DNS]
-    DNS --> AZ_A[AZ-A\nApp + DB Primary]
-    DNS --> AZ_B[AZ-B\nApp + DB Replica]
-    AZ_A -- replication --> AZ_B
-    AZ_A -. fails .-> AZ_B
-    Note[If AZ-A fails, DNS routes to AZ-B]
-```
-
----
-
-## Stateless vs Stateful
-
-| | Stateless | Stateful |
-|--|-----------|---------|
-| Session data | Not stored on server | Stored on server |
-| Scaling | Easy — any instance handles any request | Hard — client must hit same instance |
-| Failure recovery | Any replica takes over | Session lost if instance dies |
-| Example | REST APIs, CDN | WebSockets, game servers |
-
-**Making stateful systems stateless:** offload session state to an external store (Redis, DynamoDB). Each server reads from the store — no pinning required.
-
-> **Connects to:** [Load Balancer](#explain-load-balancer) — stateless apps allow true round-robin. [Cache](#what-is-cache) — Redis is the standard solution to externalize session state.
-
-```mermaid
-graph TD
-    subgraph Stateless
-        LB1[Load Balancer] --> A1[Server A]
-        LB1 --> B1[Server B]
-        A1 & B1 --> Redis[(Redis\nSession Store)]
-    end
-
-    subgraph Stateful - Problem
-        LB2[Load Balancer] -->|must pin| A2[Server A\nhas session]
-        LB2 -.->|breaks session| B2[Server B\nno session]
-    end
+    Health Check->>Primary DB: ping
+    Primary DB-->>Health Check: no response
+    Health Check->>App: promote secondary
+    App->>Secondary DB: now writing here
+    Note over Secondary DB: Secondary becomes new Primary
 ```
 
 ---
@@ -440,95 +318,79 @@ flowchart LR
 
 ---
 
-## What is Redundancy?
+## What is CDN? When should we use it?
 
-Having backups of critical components so the system never depends on a single point. If one fails, another takes over without downtime.
+A **Content Delivery Network** is a geographically distributed network of edge servers that cache static content closer to users.
 
-**Example:** Two database instances running the same data. If the primary crashes, the secondary is already up-to-date and ready.
+**When to use:**
+- Serving static assets: images, JS, CSS, videos
+- Global user base with latency requirements
+- Reducing origin server load
 
-> **Connects to:** [Failover](#what-is-failover) — redundancy makes failover possible. [Replication](#diff-between-sharding-and-replication) — the mechanism that keeps replicas in sync.
+**How it works:** User requests an asset → CDN edge checks cache → if miss, fetches from origin and caches → subsequent users in the same region get cached response.
 
-```mermaid
-graph TD
-    Client --> LB[Load Balancer]
-    LB --> A[Server A]
-    LB --> B[Server B - backup]
-    A --> DB1[(Primary DB)]
-    B --> DB1
-    DB1 -- replication --> DB2[(Secondary DB - backup)]
-```
-
----
-
-## What is Failover?
-
-The process where the system automatically switches from a failed component to its backup, with no manual intervention required.
-
-**Example:** Primary database crashes → health check detects failure → traffic is rerouted to the secondary in seconds.
-
-> **Connects to:** [Redundancy](#what-is-redundancy) — requires redundant components to fail over to. [Multi-AZ](#multi-az-multi-availability-zone) — AZ-level failover uses DNS. [High Availability](#how-would-you-ensure-high-availability) — failover is a core HA mechanism.
-
-```mermaid
-sequenceDiagram
-    participant App
-    participant Primary DB
-    participant Secondary DB
-    participant Health Check
-
-    Health Check->>Primary DB: ping
-    Primary DB-->>Health Check: no response
-    Health Check->>App: promote secondary
-    App->>Secondary DB: now writing here
-    Note over Secondary DB: Secondary becomes new Primary
-```
-
----
-
-## Explain Load Balancer
-
-Distributes incoming traffic across multiple servers to improve scalability and availability. Prevents any single server from being overwhelmed. If a server fails, the load balancer stops sending traffic to it.
-
-**Common algorithms:**
-- **Round Robin** — each server gets requests in turn
-- **Least Connections** — sends to the server with fewest active connections
-- **IP Hash** — same client always hits the same server (useful for session stickiness)
-
-> **Connects to:** [Scalability](#what-is-scalability) — horizontal scaling requires a load balancer. [Stateless vs Stateful](#stateless-vs-stateful) — stateless apps allow true round-robin without session pinning. [API Gateway](#what-is-api-gateway-vs-load-balancer) — gateway sits above the load balancer in a microservice stack.
+> **Connects to:** [Cache](#what-is-cache) — CDN is effectively a geographically distributed cache layer. [Non-Functional Requirements](#what-is-functional-and-non-functional-requirements) — latency < 200ms often requires a CDN.
 
 ```mermaid
 graph LR
-    Users -->|requests| LB[Load Balancer]
-    LB -->|round robin| S1[Server 1]
-    LB -->|round robin| S2[Server 2]
-    LB -->|round robin| S3[Server 3]
-    S1 & S2 & S3 --> DB[(Shared DB)]
+    US[User in São Paulo] -->|request| CDN_SA[CDN Edge\nSouth America]
+    EU[User in Berlin] -->|request| CDN_EU[CDN Edge\nEurope]
+    CDN_SA -->|cache miss| ORIGIN[Origin Server]
+    CDN_EU -->|cache miss| ORIGIN
+    CDN_SA -->|cache hit| US
+    CDN_EU -->|cache hit| EU
 ```
 
 ---
 
-## Vertical Scaling vs Horizontal Scaling
+## Multi-AZ (Multi Availability Zone)
 
-| | Vertical (Scale Up) | Horizontal (Scale Out) |
-|-|---------------------|------------------------|
-| How | Bigger machine (more CPU, RAM) | More machines |
-| Limit | Hardware ceiling | Virtually unlimited |
-| Cost | Expensive at high end | More predictable |
-| Downtime | Often requires restart | Zero downtime possible |
-| Complexity | Simple | Requires load balancer, distributed state |
+Deploying your infrastructure across multiple data centers (AZs) within a cloud region. If one AZ has a power outage or network failure, others remain unaffected.
 
-> **Connects to:** [Load Balancer](#explain-load-balancer) — mandatory for horizontal scaling. [Sharding](#diff-between-sharding-and-replication) — databases need sharding when vertical scaling of the DB hits its ceiling. [Non-Functional Requirements](#what-is-functional-and-non-functional-requirements) — scale targets (100M DAU) determine which strategy to use.
+**Multi-AZ vs Multi-Region:**
+| | Multi-AZ | Multi-Region |
+|--|----------|-------------|
+| Scope | Same city/region | Different continents |
+| Latency between nodes | ~1-5ms | ~100ms+ |
+| Use case | High availability | Disaster recovery + global latency |
+| Cost | Medium | High |
+
+> **Connects to:** [Redundancy](#what-is-redundancy) and [Failover](#what-is-failover) — Multi-AZ is the physical implementation of redundancy. [DNS](#dns-domain-name-system) — DNS routes traffic away from a failed AZ/region.
 
 ```mermaid
 graph TD
-    subgraph Vertical
-        V1[Server\n4 CPU / 16GB] --> V2[Server\n16 CPU / 64GB]
-    end
+    DNS[Route 53 / DNS]
+    DNS --> AZ_A[AZ-A\nApp + DB Primary]
+    DNS --> AZ_B[AZ-B\nApp + DB Replica]
+    AZ_A -- replication --> AZ_B
+    AZ_A -. fails .-> AZ_B
+    Note[If AZ-A fails, DNS routes to AZ-B]
+```
 
-    subgraph Horizontal
-        H[Load Balancer] --> H1[Server 1]
-        H --> H2[Server 2]
-        H --> H3[Server 3]
-    end
+---
+
+## DNS (Domain Name System)
+
+DNS translates human-readable domain names (e.g., `twitter.com`) into IP addresses that routers understand.
+
+**In system design, DNS also enables:**
+- **Failover routing** — route traffic to a secondary region if primary is down
+- **Latency-based routing** — send users to the nearest region
+- **Weighted routing** — canary deployments (e.g., 5% of traffic to new version)
+
+> **Connects to:** [Multi-AZ / High Availability](#how-would-you-ensure-high-availability) — DNS failover is the top-level switch for disaster recovery. [CDN](#what-is-cdn) — CDN edge resolution happens via DNS.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant DNS
+    participant RegionA
+    participant RegionB
+
+    User->>DNS: resolve twitter.com
+    DNS->>DNS: health check RegionA → failed
+    DNS-->>User: IP of RegionB (failover)
+    User->>RegionB: request
 ```
 
 ---
@@ -564,6 +426,144 @@ graph TD
 
     DNS -->|healthy| LB_A
     DNS -->|failover| LB_B
+```
+
+---
+
+## What is Monolithic Architecture vs Microservices? When to use each?
+
+### Monolithic
+
+All features run in a single deployable unit — one codebase, one process, one database.
+
+**When to use:**
+- Early-stage product (speed of development > scale)
+- Small team (< 10 engineers)
+- Domain is not well understood yet
+
+### Microservices
+
+Each feature/domain is an independent service with its own deployment and (often) its own database.
+
+**When to use:**
+- Different parts of the system need to scale independently
+- Teams are large and need autonomy
+- Services have very different reliability/latency requirements
+
+### Trade-offs
+
+| | Monolithic | Microservices |
+|--|------------|---------------|
+| Deployment | One artifact | Many artifacts |
+| Scalability | Scale everything | Scale per service |
+| Complexity | Low | High (networking, observability) |
+| Data | Single DB | DB per service |
+| Failure blast radius | High | Contained |
+| Team autonomy | Low | High |
+
+> **Connects to:** [Message Queue](#whats-message-queue) — microservices communicate asynchronously via queues. [API Gateway](#what-is-api-gateway-vs-load-balancer) — the single entry point for a microservice ecosystem.
+
+```mermaid
+graph TD
+    subgraph Monolithic
+        M[Single App] --> MDB[(Single DB)]
+    end
+
+    subgraph Microservices
+        GW[API Gateway] --> US[User Service]
+        GW --> TS[Tweet Service]
+        GW --> FS[Feed Service]
+        US --> UDB[(User DB)]
+        TS --> TDB[(Tweet DB)]
+        TS --> MQ[[Message Queue]]
+        MQ --> FS
+        FS --> FDB[(Feed DB)]
+    end
+```
+
+---
+
+## What's a Message Queue? Where should we use it?
+
+A message queue is a buffer that decouples producers (who generate work) from consumers (who process it). Producers push messages; consumers pull and process at their own pace.
+
+**When to use:**
+- **Async processing** — sending emails, generating thumbnails, notifications
+- **Traffic spike absorption** — queue fills up; consumers process steadily
+- **Microservice decoupling** — services don't call each other directly
+- **Guaranteed delivery** — messages persist until acknowledged
+
+**Examples:** SQS, Kafka, RabbitMQ
+
+> **Connects to:** [Microservices](#what-is-monolithic-architecture-vs-microservices) — primary communication mechanism between services. [Scalability](#what-is-scalability) — buffers bursts without overloading downstream services.
+
+```mermaid
+sequenceDiagram
+    participant API
+    participant Queue
+    participant Worker1
+    participant Worker2
+
+    API->>Queue: enqueue("send_email", payload)
+    API->>Queue: enqueue("resize_image", payload)
+    Note over API: API returns 202 immediately
+
+    Queue->>Worker1: dequeue task
+    Queue->>Worker2: dequeue task
+    Worker1-->>Queue: ack (done)
+    Worker2-->>Queue: ack (done)
+```
+
+---
+
+## What is API Gateway vs Load Balancer?
+
+Both sit in front of your services, but they serve different purposes.
+
+| | Load Balancer | API Gateway |
+|--|--------------|-------------|
+| Purpose | Distribute traffic evenly | Route, transform, and control API requests |
+| Layer | L4 (TCP) or L7 (HTTP) | L7 (HTTP/REST/gRPC) |
+| Features | Health checks, round robin | Auth, rate limiting, request routing, SSL termination |
+| Awareness | Which server? | Which endpoint/service? |
+
+**Rule of thumb:** Load balancer = traffic distribution. API Gateway = smart front door for a microservice ecosystem.
+
+> **Connects to:** [Microservices](#what-is-monolithic-architecture-vs-microservices) — API gateway is the standard entry point. [Load Balancer](#explain-load-balancer) for traffic distribution detail.
+
+```mermaid
+graph LR
+    Client --> GW[API Gateway\nAuth · Rate Limit · Routing]
+    GW --> LB1[Load Balancer]
+    GW --> LB2[Load Balancer]
+    LB1 --> US1[User Service]
+    LB1 --> US2[User Service]
+    LB2 --> TS1[Tweet Service]
+    LB2 --> TS2[Tweet Service]
+```
+
+---
+
+## Web Application Firewall (WAF)
+
+A WAF inspects HTTP traffic between clients and your web application, blocking malicious requests before they reach your servers.
+
+**What it protects against:**
+- SQL Injection
+- XSS (Cross-Site Scripting)
+- DDoS at the application layer (L7)
+- Bot scraping and credential stuffing
+
+**Where it sits:** Between the CDN/internet and your API Gateway or Load Balancer.
+
+> **Connects to:** [API Gateway](#what-is-api-gateway-vs-load-balancer) — WAF sits upstream of the gateway. [Non-Functional Requirements](#what-is-functional-and-non-functional-requirements) — security is a key non-functional requirement.
+
+```mermaid
+graph LR
+    Internet --> WAF[WAF\nBlocks malicious traffic]
+    WAF --> CDN[CDN]
+    CDN --> GW[API Gateway]
+    GW --> Services[Backend Services]
 ```
 
 ---
