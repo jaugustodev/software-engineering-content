@@ -63,7 +63,7 @@ How well the system should perform — expressed as _"The system should be..."_ 
 - The system should scale to **100M+ DAU**
 - Feed should render in **< 200ms**
 
-> **Connects to:** [Scalability](#what-is-scalability) for scale requirements, [High Availability](#how-would-you-ensure-high-availability) for availability, [CAP Theorem](../databases/questions.md) for consistency trade-offs.
+> **Connects to:** [Scalability](#what-is-scalability) for scale requirements, [High Availability](#how-would-you-ensure-high-availability) for availability, [CAP Theorem](#what-is-the-cap-theorem) for consistency trade-offs.
 
 ```mermaid
 graph TD
@@ -240,6 +240,41 @@ graph TD
         U2[User 33-66%] --> S2[(Shard B)]
         U3[User 66-100%] --> S3[(Shard C)]
     end
+```
+
+---
+
+## What is the CAP Theorem?
+
+A distributed system can guarantee only **2 of 3** properties simultaneously:
+
+- **Consistency (C)** — every read returns the most recent write (or an error)
+- **Availability (A)** — every request gets a non-error response (may not be the latest data)
+- **Partition Tolerance (P)** — the system keeps operating even when network messages are dropped between nodes
+
+**The practical reality:** Network partitions are inevitable in any distributed system, so **P is always required**. The real choice is **CP vs AP**.
+
+| Choice | Behavior during partition | Examples |
+|--------|--------------------------|---------|
+| **CP** | Returns error rather than serve stale data | ZooKeeper, HBase, etcd |
+| **AP** | Returns potentially stale data but stays up | Cassandra, DynamoDB, CouchDB |
+
+**Example — Twitter feed:** AP. A slightly stale feed is fine. Going down is not.
+
+**Example — Bank transfer:** CP. Serving a stale balance (showing money already spent) is dangerous.
+
+> **Connects to:** [Non-Functional Requirements](#what-is-functional-and-non-functional-requirements) — CAP is checklist item #1 when evaluating requirements. [Replication](#diff-between-sharding-and-replication) — sync replication → CP; async replication → AP. [High Availability](#how-would-you-ensure-high-availability) — HA systems favor AP, accepting eventual consistency.
+
+```mermaid
+graph TD
+    CAP[CAP Theorem\npick 2 of 3]
+    CAP --> C[Consistency\nevery read = latest write]
+    CAP --> A[Availability\nevery request gets a response]
+    CAP --> P[Partition Tolerance\nworks despite network failures]
+
+    P -->|always required in practice| CHOOSE{Real choice}
+    CHOOSE -->|CP| CP_EX[ZooKeeper · HBase · etcd]
+    CHOOSE -->|AP| AP_EX[Cassandra · DynamoDB · CouchDB]
 ```
 
 ---
@@ -587,6 +622,7 @@ graph TD
     AVAIL --> FAIL[Failover]
     AVAIL --> REP[Replication]
     AVAIL --> MULTIAZ[Multi-AZ]
+    AVAIL --> CAP[CAP Theorem\nCP vs AP]
 
     LAT --> CACHE[Cache]
     LAT --> CDN[CDN]

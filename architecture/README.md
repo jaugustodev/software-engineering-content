@@ -1,3 +1,0 @@
-# Architecture
-
-- [Questions](./questions.md)
