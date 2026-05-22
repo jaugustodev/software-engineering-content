@@ -16,6 +16,8 @@ flowchart LR
     TRADE --> SCALE[Scalability & Reliability]
 ```
 
+
+
 ---
 
 ## What is Functional and Non-Functional Requirements?
@@ -24,32 +26,37 @@ flowchart LR
 
 ### Functional Requirements
 
-What the system **must do** — expressed as _"Users/Clients should be able to..."_ statements.
+What the system **must do** — expressed as *"Users/Clients should be able to..."* statements.
 
 - Prioritize ruthlessly: pick the **top 3 features** that matter most
 - Involve the interviewer: ask clarifying questions like you would a product manager
 
 **Example — Twitter:**
+
 - Users should be able to post tweets
 - Users should be able to follow other users
 - Users should be able to see a feed of tweets from followed users
 
 **Example — Cache System:**
+
 - Clients should be able to insert items
 - Clients should be able to set expirations
 - Clients should be able to read items
 
 ### Non-Functional Requirements
 
-How well the system should perform — expressed as _"The system should be..."_ statements. **Always quantify when possible.**
+How well the system should perform — expressed as *"The system should be..."* statements. **Always quantify when possible.**
 
-| Quality | Vague | Quantified |
-|---------|-------|------------|
-| Latency | low latency | < 200ms p99 |
-| Availability | highly available | 99.99% uptime |
-| Scale | handles many users | 100M DAU |
+
+| Quality      | Vague              | Quantified    |
+| ------------ | ------------------ | ------------- |
+| Latency      | low latency        | < 200ms p99   |
+| Availability | highly available   | 99.99% uptime |
+| Scale        | handles many users | 100M DAU      |
+
 
 **Evaluation checklist:**
+
 1. CAP Theorem — consistency vs. availability?
 2. Environment constraints — mobile, bandwidth, memory?
 3. Scalability — read/write ratio, traffic spikes?
@@ -59,6 +66,7 @@ How well the system should perform — expressed as _"The system should be..."_ 
 7. Fault tolerance expectations
 
 **Example — Twitter:**
+
 - The system should be **highly available**, prioritizing availability over consistency
 - The system should scale to **100M+ DAU**
 - Feed should render in **< 200ms**
@@ -82,6 +90,8 @@ graph TD
     NF --> NF4[Durability]
 ```
 
+
+
 ---
 
 ## What is Scalability?
@@ -89,6 +99,7 @@ graph TD
 The ability of a system to handle increasing load — more users, more requests, more data — without degrading performance.
 
 Two dimensions:
+
 - **Horizontal scaling (scale out):** add more machines → see [Vertical vs Horizontal Scaling](#vertical-scaling-vs-horizontal-scaling)
 - **Vertical scaling (scale up):** make machines bigger
 
@@ -105,17 +116,21 @@ graph LR
     LB --> S3[Server 3]
 ```
 
+
+
 ---
 
 ## Vertical Scaling vs Horizontal Scaling
 
-| | Vertical (Scale Up) | Horizontal (Scale Out) |
-|-|---------------------|------------------------|
-| How | Bigger machine (more CPU, RAM) | More machines |
-| Limit | Hardware ceiling | Virtually unlimited |
-| Cost | Expensive at high end | More predictable |
-| Downtime | Often requires restart | Zero downtime possible |
-| Complexity | Simple | Requires load balancer, distributed state |
+
+|            | Vertical (Scale Up)            | Horizontal (Scale Out)                    |
+| ---------- | ------------------------------ | ----------------------------------------- |
+| How        | Bigger machine (more CPU, RAM) | More machines                             |
+| Limit      | Hardware ceiling               | Virtually unlimited                       |
+| Cost       | Expensive at high end          | More predictable                          |
+| Downtime   | Often requires restart         | Zero downtime possible                    |
+| Complexity | Simple                         | Requires load balancer, distributed state |
+
 
 > **Connects to:** [Load Balancer](#explain-load-balancer) — mandatory for horizontal scaling. [Sharding](#diff-between-sharding-and-replication) — databases need sharding when vertical scaling of the DB hits its ceiling. [Non-Functional Requirements](#what-is-functional-and-non-functional-requirements) — scale targets (100M DAU) determine which strategy to use.
 
@@ -132,6 +147,8 @@ graph TD
     end
 ```
 
+
+
 ---
 
 ## Explain Load Balancer
@@ -139,49 +156,63 @@ graph TD
 Distributes incoming traffic across multiple servers to improve scalability and availability. Prevents any single server from being overwhelmed. If a server fails, the load balancer stops sending traffic to it.
 
 **Common algorithms:**
-- **Round Robin** — each server gets requests in turn
-- **Least Connections** — sends to the server with fewest active connections
-- **IP Hash** — same client always hits the same server (useful for session stickiness)
+
+- **Round Robin** — distributes requests in sequence: S1, S2, S3, S1… Simplest option; works well when all servers are equal.
+- **Least Connections** — sends the request to whichever server is least busy. Better when requests take different amounts of time (e.g., file uploads vs. quick API calls).
+- **IP Hash** — the same client always goes to the same server, based on their IP. Used when the server holds session state locally (not recommended — prefer external session storage).
+
+**Technologies:**
+
+- **NGINX / HAProxy** — software load balancers you run yourself. Standard choice for on-premise or custom setups.
+- **AWS ALB** — managed load balancer on AWS. Can route by URL path (`/api` → service A, `/images` → service B). Most common for cloud apps.
+- **Cloudflare** — sits in front of everything, at the DNS level. Routes users to the nearest server globally before the request even reaches your infrastructure.
 
 > **Connects to:** [Scalability](#what-is-scalability) — horizontal scaling requires a load balancer. [Stateless vs Stateful](#stateless-vs-stateful) — stateless apps allow true round-robin without session pinning. [API Gateway](#what-is-api-gateway-vs-load-balancer) — gateway sits above the load balancer in a microservice stack.
 
 ```mermaid
 graph LR
-    Users -->|requests| LB[Load Balancer]
-    LB -->|round robin| S1[Server 1]
-    LB -->|round robin| S2[Server 2]
-    LB -->|round robin| S3[Server 3]
+    Users -->|requests| LB[Load Balancer\nNGINX / AWS ALB]
+    LB -->|least connections| S1[Server 1]
+    LB -->|least connections| S2[Server 2]
+    LB -->|least connections| S3[Server 3]
     S1 & S2 & S3 --> DB[(Shared DB)]
 ```
+
+
 
 ---
 
 ## Stateless vs Stateful
 
-| | Stateless | Stateful |
-|--|-----------|---------|
-| Session data | Not stored on server | Stored on server |
-| Scaling | Easy — any instance handles any request | Hard — client must hit same instance |
-| Failure recovery | Any replica takes over | Session lost if instance dies |
-| Example | REST APIs, CDN | WebSockets, game servers |
+Think of a **stateless** server as a cashier with no memory — every time you approach, you have to reintroduce yourself. The cashier doesn't care who you are; they just process whatever you hand them.
 
-**Making stateful systems stateless:** offload session state to an external store (Redis, DynamoDB). Each server reads from the store — no pinning required.
+A **stateful** server is like your personal banker — they remember you, your history, and your preferences. But if they're sick and someone else covers, that person knows nothing about you.
 
-> **Connects to:** [Load Balancer](#explain-load-balancer) — stateless apps allow true round-robin. [Cache](#what-is-cache) — Redis is the standard solution to externalize session state.
+**Stateless** — the server doesn't remember anything between requests. Each request carries everything the server needs (e.g., a token). Any server can handle any request.
+
+**Stateful** — the server remembers you between requests (e.g., stores your session in memory). The problem: if the load balancer sends you to a different server, your session is gone.
+
+**Why stateless wins at scale:** you can add or remove servers freely. With stateful, you're forced to always send the same user to the same server ("sticky sessions"), which makes scaling and failure recovery painful.
+
+**The fix when you need state:** store it outside the server in Redis or a database. Now all servers share the same session data and stay stateless themselves.
 
 ```mermaid
 graph TD
-    subgraph Stateless
+    subgraph Stateless ✅
         LB1[Load Balancer] --> A1[Server A]
         LB1 --> B1[Server B]
-        A1 & B1 --> Redis[(Redis\nSession Store)]
+        A1 & B1 --> Redis[(Redis\nShared Session)]
     end
 
-    subgraph Stateful - Problem
-        LB2[Load Balancer] -->|must pin| A2[Server A\nhas session]
-        LB2 -.->|breaks session| B2[Server B\nno session]
+    subgraph Stateful ⚠️
+        LB2[Load Balancer] -->|must always go here| A2[Server A\nhas session]
+        LB2 -.->|session lost| B2[Server B\nno session]
     end
 ```
+
+> **Connects to:** [Load Balancer](#explain-load-balancer) — stateless apps allow true round-robin. [Cache](#what-is-cache) — Redis is the standard solution to externalize session state.
+
+
 
 ---
 
@@ -203,6 +234,8 @@ graph TD
     DB1 -- replication --> DB2[(Secondary DB - backup)]
 ```
 
+
+
 ---
 
 ## Diff between Sharding and Replication?
@@ -217,12 +250,14 @@ Copy the same data to multiple nodes. Primary handles writes; replicas serve rea
 
 Split data across multiple nodes (shards). Each shard owns a subset of the data (e.g., by user ID range or hash).
 
-| | Replication | Sharding |
-|--|-------------|---------|
-| Problem solved | Read scale + availability | Write scale + storage |
-| Data per node | Full copy | Partial (its shard only) |
-| Failure impact | Failover available | Shard loss = data loss (mitigated with replication per shard) |
-| Complexity | Low | High (routing, resharding, hotspots) |
+
+|                | Replication               | Sharding                                                      |
+| -------------- | ------------------------- | ------------------------------------------------------------- |
+| Problem solved | Read scale + availability | Write scale + storage                                         |
+| Data per node  | Full copy                 | Partial (its shard only)                                      |
+| Failure impact | Failover available        | Shard loss = data loss (mitigated with replication per shard) |
+| Complexity     | Low                       | High (routing, resharding, hotspots)                          |
+
 
 > **Connects to:** [Redundancy](#what-is-redundancy) and [Failover](#what-is-failover) — replication enables both. [High Availability](#how-would-you-ensure-high-availability) — replication is a pillar of HA.
 
@@ -242,6 +277,8 @@ graph TD
     end
 ```
 
+
+
 ---
 
 ## What is the CAP Theorem?
@@ -254,10 +291,12 @@ A distributed system can guarantee only **2 of 3** properties simultaneously:
 
 **The practical reality:** Network partitions are inevitable in any distributed system, so **P is always required**. The real choice is **CP vs AP**.
 
-| Choice | Behavior during partition | Examples |
-|--------|--------------------------|---------|
-| **CP** | Returns error rather than serve stale data | ZooKeeper, HBase, etcd |
+
+| Choice | Behavior during partition                   | Examples                     |
+| ------ | ------------------------------------------- | ---------------------------- |
+| **CP** | Returns error rather than serve stale data  | ZooKeeper, HBase, etcd       |
 | **AP** | Returns potentially stale data but stays up | Cassandra, DynamoDB, CouchDB |
+
 
 **Example — Twitter feed:** AP. A slightly stale feed is fine. Going down is not.
 
@@ -276,6 +315,8 @@ graph TD
     CHOOSE -->|CP| CP_EX[ZooKeeper · HBase · etcd]
     CHOOSE -->|AP| AP_EX[Cassandra · DynamoDB · CouchDB]
 ```
+
+
 
 ---
 
@@ -301,6 +342,8 @@ sequenceDiagram
     Note over Secondary DB: Secondary becomes new Primary
 ```
 
+
+
 ---
 
 ## What is Cache? Cache Invalidation, Eviction, and TTL
@@ -308,22 +351,26 @@ sequenceDiagram
 A cache stores the result of expensive operations (DB queries, API calls, computations) in fast memory so future requests skip the expensive step.
 
 **Benefits:**
+
 - Dramatically lower latency (memory vs disk/network)
 - Reduced load on databases
 - Higher throughput per dollar
 
 ### Cache Patterns
 
-| Pattern | How it works | Use case |
-|---------|-------------|----------|
-| Cache-aside | App checks cache first, writes on miss | General reads |
-| Write-through | Write to cache and DB together | Strong consistency |
-| Write-behind | Write to cache, async flush to DB | High write throughput |
-| Read-through | Cache fetches from DB on miss automatically | Simplified reads |
+
+| Pattern       | How it works                                | Use case              |
+| ------------- | ------------------------------------------- | --------------------- |
+| Cache-aside   | App checks cache first, writes on miss      | General reads         |
+| Write-through | Write to cache and DB together              | Strong consistency    |
+| Write-behind  | Write to cache, async flush to DB           | High write throughput |
+| Read-through  | Cache fetches from DB on miss automatically | Simplified reads      |
+
 
 ### Eviction Policies
 
 When cache is full, something must be removed:
+
 - **LRU** (Least Recently Used) — remove the least recently accessed item
 - **LFU** (Least Frequently Used) — remove the least accessed overall
 - **FIFO** — remove the oldest inserted item
@@ -335,6 +382,7 @@ Each entry expires after a set duration. Prevents serving stale data indefinitel
 ### Cache Invalidation
 
 The hard problem: when the source data changes, how do you update/remove the cached version?
+
 - **TTL-based** — accept some staleness, let it expire
 - **Event-driven** — on DB write, explicitly delete/update cache entry
 - **Cache-aside write** — invalidate on write, re-populate on next read
@@ -351,6 +399,8 @@ flowchart LR
     DB --> Response2[Return value]
 ```
 
+
+
 ---
 
 ## What is CDN? When should we use it?
@@ -358,6 +408,7 @@ flowchart LR
 A **Content Delivery Network** is a geographically distributed network of edge servers that cache static content closer to users.
 
 **When to use:**
+
 - Serving static assets: images, JS, CSS, videos
 - Global user base with latency requirements
 - Reducing origin server load
@@ -376,6 +427,8 @@ graph LR
     CDN_EU -->|cache hit| EU
 ```
 
+
+
 ---
 
 ## Multi-AZ (Multi Availability Zone)
@@ -383,12 +436,15 @@ graph LR
 Deploying your infrastructure across multiple data centers (AZs) within a cloud region. If one AZ has a power outage or network failure, others remain unaffected.
 
 **Multi-AZ vs Multi-Region:**
-| | Multi-AZ | Multi-Region |
-|--|----------|-------------|
-| Scope | Same city/region | Different continents |
-| Latency between nodes | ~1-5ms | ~100ms+ |
-| Use case | High availability | Disaster recovery + global latency |
-| Cost | Medium | High |
+
+
+|                       | Multi-AZ          | Multi-Region                       |
+| --------------------- | ----------------- | ---------------------------------- |
+| Scope                 | Same city/region  | Different continents               |
+| Latency between nodes | ~1-5ms            | ~100ms+                            |
+| Use case              | High availability | Disaster recovery + global latency |
+| Cost                  | Medium            | High                               |
+
 
 > **Connects to:** [Redundancy](#what-is-redundancy) and [Failover](#what-is-failover) — Multi-AZ is the physical implementation of redundancy. [DNS](#dns-domain-name-system) — DNS routes traffic away from a failed AZ/region.
 
@@ -402,6 +458,8 @@ graph TD
     Note[If AZ-A fails, DNS routes to AZ-B]
 ```
 
+
+
 ---
 
 ## DNS (Domain Name System)
@@ -409,6 +467,7 @@ graph TD
 DNS translates human-readable domain names (e.g., `twitter.com`) into IP addresses that routers understand.
 
 **In system design, DNS also enables:**
+
 - **Failover routing** — route traffic to a secondary region if primary is down
 - **Latency-based routing** — send users to the nearest region
 - **Weighted routing** — canary deployments (e.g., 5% of traffic to new version)
@@ -428,6 +487,8 @@ sequenceDiagram
     User->>RegionB: request
 ```
 
+
+
 ---
 
 ## How would you ensure High Availability?
@@ -435,6 +496,7 @@ sequenceDiagram
 Eliminate single points of failure at every layer of the stack.
 
 **Strategy:**
+
 1. Multiple app instances behind a load balancer
 2. Database primary/secondary replication with automatic failover
 3. Multi-AZ (or multi-region) deployment for disaster recovery
@@ -463,6 +525,8 @@ graph TD
     DNS -->|failover| LB_B
 ```
 
+
+
 ---
 
 ## What is Monolithic Architecture vs Microservices? When to use each?
@@ -472,6 +536,7 @@ graph TD
 All features run in a single deployable unit — one codebase, one process, one database.
 
 **When to use:**
+
 - Early-stage product (speed of development > scale)
 - Small team (< 10 engineers)
 - Domain is not well understood yet
@@ -481,20 +546,23 @@ All features run in a single deployable unit — one codebase, one process, one 
 Each feature/domain is an independent service with its own deployment and (often) its own database.
 
 **When to use:**
+
 - Different parts of the system need to scale independently
 - Teams are large and need autonomy
 - Services have very different reliability/latency requirements
 
 ### Trade-offs
 
-| | Monolithic | Microservices |
-|--|------------|---------------|
-| Deployment | One artifact | Many artifacts |
-| Scalability | Scale everything | Scale per service |
-| Complexity | Low | High (networking, observability) |
-| Data | Single DB | DB per service |
-| Failure blast radius | High | Contained |
-| Team autonomy | Low | High |
+
+|                      | Monolithic       | Microservices                    |
+| -------------------- | ---------------- | -------------------------------- |
+| Deployment           | One artifact     | Many artifacts                   |
+| Scalability          | Scale everything | Scale per service                |
+| Complexity           | Low              | High (networking, observability) |
+| Data                 | Single DB        | DB per service                   |
+| Failure blast radius | High             | Contained                        |
+| Team autonomy        | Low              | High                             |
+
 
 > **Connects to:** [Message Queue](#whats-message-queue) — microservices communicate asynchronously via queues. [API Gateway](#what-is-api-gateway-vs-load-balancer) — the single entry point for a microservice ecosystem.
 
@@ -516,6 +584,8 @@ graph TD
     end
 ```
 
+
+
 ---
 
 ## What's a Message Queue? Where should we use it?
@@ -523,6 +593,7 @@ graph TD
 A message queue is a buffer that decouples producers (who generate work) from consumers (who process it). Producers push messages; consumers pull and process at their own pace.
 
 **When to use:**
+
 - **Async processing** — sending emails, generating thumbnails, notifications
 - **Traffic spike absorption** — queue fills up; consumers process steadily
 - **Microservice decoupling** — services don't call each other directly
@@ -549,18 +620,22 @@ sequenceDiagram
     Worker2-->>Queue: ack (done)
 ```
 
+
+
 ---
 
 ## What is API Gateway vs Load Balancer?
 
 Both sit in front of your services, but they serve different purposes.
 
-| | Load Balancer | API Gateway |
-|--|--------------|-------------|
-| Purpose | Distribute traffic evenly | Route, transform, and control API requests |
-| Layer | L4 (TCP) or L7 (HTTP) | L7 (HTTP/REST/gRPC) |
-| Features | Health checks, round robin | Auth, rate limiting, request routing, SSL termination |
-| Awareness | Which server? | Which endpoint/service? |
+
+|           | Load Balancer              | API Gateway                                           |
+| --------- | -------------------------- | ----------------------------------------------------- |
+| Purpose   | Distribute traffic evenly  | Route, transform, and control API requests            |
+| Layer     | L4 (TCP) or L7 (HTTP)      | L7 (HTTP/REST/gRPC)                                   |
+| Features  | Health checks, round robin | Auth, rate limiting, request routing, SSL termination |
+| Awareness | Which server?              | Which endpoint/service?                               |
+
 
 **Rule of thumb:** Load balancer = traffic distribution. API Gateway = smart front door for a microservice ecosystem.
 
@@ -577,6 +652,8 @@ graph LR
     LB2 --> TS2[Tweet Service]
 ```
 
+
+
 ---
 
 ## Web Application Firewall (WAF)
@@ -584,6 +661,7 @@ graph LR
 A WAF inspects HTTP traffic between clients and your web application, blocking malicious requests before they reach your servers.
 
 **What it protects against:**
+
 - SQL Injection
 - XSS (Cross-Site Scripting)
 - DDoS at the application layer (L7)
@@ -600,6 +678,8 @@ graph LR
     CDN --> GW[API Gateway]
     GW --> Services[Backend Services]
 ```
+
+
 
 ---
 
@@ -641,3 +721,6 @@ graph TD
     MONO[Monolith vs Microservices] --> GW
     MONO --> MQ
 ```
+
+
+
