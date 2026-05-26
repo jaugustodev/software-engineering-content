@@ -146,16 +146,16 @@ Every notification travels through a defined set of states from creation to fina
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Pending: Notification event created\n(event_id assigned, saved to DB)
-    Pending --> Sent: Worker calls provider\n(APNs / FCM / Twilio / SendGrid)\nProvider returns 200 OK
-    Pending --> Failed: Provider error after\nall retries exhausted\n→ move to DLQ
-    Sent --> Delivered: OS delivers notification\nto device (confirmed by SDK callback\nor delivery receipt)
-    Sent --> Bounced: Invalid device token\n(APNs 410 Gone / FCM not-registered)\n→ delete token from device table
-    Delivered --> Clicked: User taps notification\n(SDK callback / click-through URL)
+    [*] --> Pending: Notification event created (event_id assigned, saved to DB)
+    Pending --> Sent: Worker calls provider (APNs / FCM / Twilio / SendGrid) and gets 200 OK
+    Pending --> Failed: Provider error after all retries exhausted - move to DLQ
+    Sent --> Delivered: OS delivers notification to device via SDK callback or delivery receipt
+    Sent --> Bounced: Invalid device token (APNs 410 Gone / FCM not-registered) - delete token
+    Delivered --> Clicked: User taps notification via SDK callback or click-through URL
     Delivered --> Dismissed: User swipes away
-    Delivered --> Unsubscribed: User opts out from\nnotification settings
-    Failed --> [*]: Alert fires to on-call\nDLQ for manual replay
-    Clicked --> [*]: Analytics event recorded\n(engagement metric)
+    Delivered --> Unsubscribed: User opts out from notification settings
+    Failed --> [*]: Alert fires to on-call - DLQ for manual replay
+    Clicked --> [*]: Analytics event recorded (engagement metric)
     Dismissed --> [*]: No action
     Unsubscribed --> [*]: opt_in = false written to DB
 ```
@@ -173,18 +173,18 @@ sequenceDiagram
     participant iPhone
 
     Note over Worker: Has device_token + JSON payload
-    Worker->>APNs: HTTP/2 POST /3/device/{device_token}\nHeaders: apns-topic, apns-priority, authorization (JWT)\nBody: {"aps":{"alert":{"title":"...","body":"..."},"badge":9}}
-    
+    Worker->>APNs: HTTP/2 POST /3/device/[token] with APS JSON payload and auth JWT header
+
     alt Success
         APNs-->>Worker: 200 OK
         APNs->>iPhone: Push notification delivered
         Worker->>DB: UPDATE status=sent
     else Invalid token
-        APNs-->>Worker: 410 Gone\n{"reason": "Unregistered"}
-        Worker->>DB: DELETE FROM device WHERE device_token=...
+        APNs-->>Worker: 410 Gone - reason: Unregistered
+        Worker->>DB: DELETE FROM device WHERE device_token matches
     else Provider error
         APNs-->>Worker: 500 / 503
-        Worker->>Worker: Retry with exponential backoff\n(1s → 2s → 4s → DLQ)
+        Worker->>Worker: Retry with exponential backoff - 1s then 2s then 4s then DLQ
     end
 ```
 
@@ -197,14 +197,14 @@ sequenceDiagram
     participant FCM as Firebase Cloud Messaging
     participant Android
 
-    Worker->>FCM: POST https://fcm.googleapis.com/fcm/send\nAuthorization: key=<server_key>\nBody: {"to": "<registration_token>",\n "notification": {"title":"...", "body":"..."},\n "data": {"order_id": "12345"}}
-    
+    Worker->>FCM: POST fcm.googleapis.com/fcm/send with registration_token, notification title and body
+
     alt Success
-        FCM-->>Worker: {"success": 1, "message_id": "..."}
+        FCM-->>Worker: success:1, message_id assigned
         FCM->>Android: Push delivered
         Worker->>DB: UPDATE status=sent
     else Stale token
-        FCM-->>Worker: {"failure": 1,\n "results": [{"error": "NotRegistered"}]}
+        FCM-->>Worker: failure:1, error: NotRegistered
         Worker->>DB: DELETE stale token
     end
 ```
@@ -218,15 +218,15 @@ sequenceDiagram
     participant Twilio
     participant Phone
 
-    Worker->>Twilio: POST https://api.twilio.com/2010-04-01/Accounts/{AccountSid}/Messages.json\nBasic Auth: AccountSid:AuthToken\nBody: To=+14155552671&From=+14155552672&Body=Your+order+shipped
+    Worker->>Twilio: POST api.twilio.com/Accounts/[AccountSid]/Messages with To, From, Body fields
 
     alt Success
-        Twilio-->>Worker: 201 Created\n{"status": "queued", "sid": "SMxxxxxxx"}
+        Twilio-->>Worker: 201 Created - status queued, sid assigned
         Note over Twilio,Phone: Twilio handles carrier routing
         Twilio->>Phone: SMS delivered
         Worker->>DB: UPDATE status=sent
     else Invalid number
-        Twilio-->>Worker: 400 Bad Request\n{"code": 21211, "message": "Invalid To number"}
+        Twilio-->>Worker: 400 Bad Request - code 21211, Invalid To number
         Worker->>DB: UPDATE status=invalid
     end
 ```
@@ -240,17 +240,17 @@ sequenceDiagram
     participant SendGrid
     participant Inbox
 
-    Worker->>SendGrid: POST https://api.sendgrid.com/v3/mail/send\nAuthorization: Bearer <API_KEY>\nBody: {"personalizations":[{"to":[{"email":"user@example.com"}]}],\n "from":{"email":"noreply@example.com"},\n "subject":"Your order shipped",\n "content":[{"type":"text/html","value":"<html>..."}]}
+    Worker->>SendGrid: POST api.sendgrid.com/v3/mail/send with to, from, subject and HTML content
 
     alt Delivered
         SendGrid-->>Worker: 202 Accepted
-        Note over SendGrid: Handles spam filtering,\nbounce management, delivery tracking
+        Note over SendGrid: Handles spam filtering, bounce management, delivery tracking
         SendGrid->>Inbox: Email delivered
     else Hard bounce (invalid email)
-        SendGrid-->>Worker: Webhook: {event:"bounce", type:"permanent"}
-        Worker->>DB: Mark email as invalid,\nsuppress future sends
+        SendGrid-->>Worker: Webhook - event bounce, type permanent
+        Worker->>DB: Mark email as invalid, suppress future sends
     else Spam complaint
-        SendGrid-->>Worker: Webhook: {event:"spamreport"}
+        SendGrid-->>Worker: Webhook - event spamreport
         Worker->>DB: Set opt_in=false for email channel
     end
 ```
@@ -312,7 +312,7 @@ sequenceDiagram
     User->>App: Install app / sign up
     App->>App: Request push notification permission
     App->>App: Get device token from OS (APNs/FCM)
-    App->>APIServer: POST /register {user_id, device_token, phone, email}
+    App->>APIServer: POST /register with user_id, device_token, phone, email
     APIServer->>DB: INSERT into device table (device_token)
     APIServer->>DB: INSERT/UPDATE user table (phone, email)
     APIServer-->>App: 200 OK
@@ -332,17 +332,17 @@ sequenceDiagram
     participant APNs
     participant iPhone
 
-    Service->>NS: send_notification(user_id=42, message="Your order shipped")
+    Service->>NS: send_notification - user_id=42, message=Your order shipped
     NS->>DB: Lookup device_tokens for user_id=42
-    NS->>DB: Check opt_in for iOS channel (user_id=42, channel=push)
-    NS->>NS: Check rate limit (< 20 pushes today for user 42?)
-    NS->>Queue: Enqueue {event_id, device_token, payload} to iOS Queue
+    NS->>DB: Check opt_in for iOS channel - user_id=42, channel=push
+    NS->>NS: Check rate limit - less than 20 pushes today for user 42?
+    NS->>Queue: Enqueue event_id, device_token, payload to iOS Queue
     NS->>DB: Save notification log (status=pending)
     NS-->>Service: 200 OK (async, not waiting for delivery)
 
     Queue->>Worker: Dequeue job
     Worker->>Worker: Check event_id in Redis (dedup)
-    Worker->>APNs: POST /3/device/{device_token} with payload
+    Worker->>APNs: POST /3/device/[device_token] with payload
     APNs->>iPhone: Push notification delivered
     APNs-->>Worker: 200 OK
     Worker->>DB: Update notification log (status=sent)
@@ -356,11 +356,11 @@ flowchart TD
     Worker["Worker dequeues notification"] --> Send["Call APNs/FCM/Twilio/SendGrid"]
     Send --> Result{Response?}
     Result -->|"200 OK"| Done["Update DB: status=sent\nRecord in analytics"]
-    Result -->|"Error (transient)"| Retry{Retry count\n< max?}
-    Retry -->|"Yes"| Backoff["Wait (1s → 2s → 4s)\nexponential backoff"] --> Send
+    Result -->|"Error (transient)"| Retry{Retry count < max?}
+    Retry -->|"Yes"| Backoff["Wait 1s then 2s then 4s (exponential backoff)"] --> Send
     Retry -->|"No"| DLQ["Move to Dead Letter Queue"]
     DLQ --> Alert["Alert on-call engineer"]
-    Result -->|"410 Gone (APNs)\nor not-registered (FCM)"| Delete["Delete stale device token\nfrom device table"]
+    Result -->|"410 Gone or NotRegistered"| Delete["Delete stale device token from device table"]
 ```
 
 ### User Preferences and Rate Limit Gate
