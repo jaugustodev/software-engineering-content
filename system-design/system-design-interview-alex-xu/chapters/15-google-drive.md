@@ -133,6 +133,89 @@ At scale (1 million concurrent users), each notification server holds ~1 million
 | Notification service | 1M+ long-poll connections per server; if server fails, all connections are lost — clients detect disconnect and reconnect to a different server; reconnection is slow (gradual ramp-up) |
 | Offline backup queue | Queues replicated multiple times; consumers re-subscribe to backup queue on primary failure |
 
+### Delta Sync Algorithm — Step by Step
+Delta sync identifies exactly which parts of a file changed without comparing raw bytes. The block hash list is the change fingerprint:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant BlockServer
+    participant S3
+    participant MetadataDB
+
+    Note over Client: User edits paragraph 2 of a 12MB file\n(3 blocks: A=4MB, B=4MB, C=4MB)
+
+    Client->>Client: Recompute hashes after edit:\n  Block 1: SHA256 → hash_A (unchanged)\n  Block 2: SHA256 → hash_B_new (changed!)\n  Block 3: SHA256 → hash_C (unchanged)
+
+    Client->>BlockServer: Upload request\n{file_id, new_block_list: [hash_A, hash_B_new, hash_C]}
+
+    BlockServer->>MetadataDB: Fetch previous version block_list
+    MetadataDB-->>BlockServer: Previous: [hash_A, hash_B_old, hash_C]
+
+    BlockServer->>BlockServer: Diff: [hash_A, hash_B_new, hash_C] vs [hash_A, hash_B_old, hash_C]\nNew blocks to upload: [hash_B_new]
+
+    BlockServer->>S3: Check: does hash_B_new already exist?
+    S3-->>BlockServer: No (dedup check)
+    
+    BlockServer->>S3: PUT block at key=hash_B_new (compress → encrypt → store)
+    S3-->>BlockServer: Stored
+
+    BlockServer->>MetadataDB: INSERT file_version\n{file_id, block_list: [hash_A, hash_B_new, hash_C],\n created_at: NOW()}
+
+    Note over Client: Only 4MB transferred instead of 12MB (66% savings)\nFor a 1GB file with 1KB edit: ~4MB transferred vs 1GB (99.6% savings)
+```
+
+The savings scale with file size and edit size. The algorithm only needs to hash file blocks on the client — no byte-by-byte comparison required.
+
+### Content Deduplication: Cross-User and Within-User
+```mermaid
+flowchart TD
+    Upload["User uploads block with\nSHA256 hash = ABCD1234"] --> Check{Block ABCD1234\nalready in S3?}
+
+    Check -->|"Yes — seen before"| Skip["Skip upload entirely\nNew file_version references existing block\n(safe because blocks are immutable)"]
+    
+    Check -->|"No — new block"| Store["Compress → Encrypt → Upload to S3\nat key = ABCD1234"]
+
+    subgraph Examples["Real-World Cases"]
+        EX1["Two users upload same 1GB video\n→ stored once, not twice"]
+        EX2["User copies large file within Drive\n→ no upload, just a new file_version\nwith the same block_list"]
+        EX3["User renames a file\n→ only metadata changes,\nno S3 writes at all"]
+    end
+```
+
+The immutability constraint is load-bearing for deduplication correctness. If blocks could be modified in place, a later upload could silently corrupt an earlier file that shared the same block.
+
+### Strong Consistency via Cache Invalidation
+Most distributed caches accept eventual consistency (replicas may lag behind writes). Google Drive cannot — a file edited on a laptop must appear identically on the phone immediately. The mechanism:
+
+```mermaid
+sequenceDiagram
+    participant LaptopClient
+    participant APIServer
+    participant Redis as Redis Cache
+    participant MySQL as MySQL Master
+    participant Slave as MySQL Read Replica
+
+    LaptopClient->>APIServer: Upload new version of report.pdf
+    APIServer->>MySQL: INSERT file_version (block_list=[...], status=uploaded)
+    MySQL->>Slave: Replicate (asynchronous — replica may lag briefly)
+    
+    APIServer->>Redis: DEL file:{file_id}:versions (INVALIDATE cache)
+    Note over Redis: Cache entry removed — next read will go to DB
+
+    APIServer-->>LaptopClient: 200 OK
+
+    Note over APIServer,Slave: Phone opens app; requests latest version
+    PhoneClient->>APIServer: GET /files/{file_id}/versions
+    APIServer->>Redis: GET file:{file_id}:versions → cache MISS
+    APIServer->>MySQL: SELECT from master (not replica)\nto guarantee reading the just-written version
+    MySQL-->>APIServer: New block_list [hash_A, hash_B_new, hash_C]
+    APIServer->>Redis: SET file:{file_id}:versions (warm cache)
+    APIServer-->>PhoneClient: New block_list
+```
+
+The choice to **invalidate** (delete the cache entry) rather than **update** (write new data to cache) is deliberate: after invalidation, the next read is forced to go to the authoritative DB. This prevents any window where a stale cached value could be served. Reads after the invalidation go to the MySQL master until the replica catches up.
+
 ## Architecture Diagrams
 
 ### High-Level Google Drive Architecture

@@ -30,6 +30,184 @@ For small groups (up to ~100 members), the server uses a per-user inbox model: t
 ### Offline Delivery via Push Notifications
 When a message is sent to an offline user, the chat server checks the presence service and finds no active connection. It then forwards a push notification request to the notification service, which sends the message preview via APNs (iOS) or FCM (Android). When the user comes back online, they fetch all messages with IDs greater than their last cursor from Cassandra, catching up on the full conversation — not just the push notification summary.
 
+### Protocol Deep Dive: Polling vs Long Polling vs WebSocket
+Understanding why WebSocket was chosen requires understanding what the alternatives look like at the protocol level.
+
+#### HTTP Short Polling
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
+
+    Note over Client,Server: Client polls every N seconds — most responses are empty
+    Client->>Server: GET /messages?since=T1
+    Server-->>Client: 200 OK [] (no new messages)
+    
+    Client->>Server: GET /messages?since=T1
+    Server-->>Client: 200 OK [] (no new messages)
+    
+    Note over Server: Message arrives for client
+    
+    Client->>Server: GET /messages?since=T1
+    Server-->>Client: 200 OK [{"from":"Bob","text":"hey"}]
+
+    Note over Client,Server: Problems: high server load from empty polls,\nlatency = poll interval (e.g. 3s lag),\neach request has full HTTP header overhead
+```
+
+#### HTTP Long Polling
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
+
+    Note over Client,Server: Client holds connection open until message arrives or timeout
+    Client->>Server: GET /messages (hold open)
+    Note over Server: No messages — connection held open (up to 30s)
+    
+    Note over Server: Message arrives
+    Server-->>Client: 200 OK [{"from":"Bob","text":"hey"}]
+    
+    Note over Client: Immediately opens a new connection
+    Client->>Server: GET /messages (hold open again)
+    Note over Server: No messages — connection held open
+
+    Note over Client,Server: Problems: server still manages one connection per client,\none-directional (server can't push without a pending request),\ntimeout causes disconnect + reconnect overhead
+```
+
+#### WebSocket Full-Duplex
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
+
+    Client->>Server: HTTP GET /chat\nHeaders: Upgrade: websocket\n         Connection: Upgrade\n         Sec-WebSocket-Key: dGhlIHNhbXBsZQ==
+
+    Server-->>Client: HTTP 101 Switching Protocols\nHeaders: Upgrade: websocket\n         Connection: Upgrade\n         Sec-WebSocket-Accept: s3pPL...
+
+    Note over Client,Server: TCP connection upgraded — no more HTTP overhead\nBidirectional frames can now flow in both directions
+
+    Client->>Server: WS Frame: {"type":"message","to":"bob","text":"hey"}
+    Server->>Client: WS Frame: {"type":"message","from":"bob","text":"hello back"}
+    Server->>Client: WS Frame: {"type":"read_receipt","message_id":"xyz"}
+
+    Note over Client,Server: Benefits: sub-millisecond latency,\nno header overhead per message,\nboth sides push independently
+```
+
+#### Protocol Comparison
+
+| Dimension | Short Polling | Long Polling | WebSocket |
+|-----------|--------------|--------------|-----------|
+| Connection type | New HTTP per poll | New HTTP per event | Persistent TCP |
+| Server push | No (client must poll) | Limited (one queued response) | Yes (anytime) |
+| Latency | = poll interval | Near-real-time | Real-time |
+| Header overhead | Full HTTP per request | Full HTTP per connect | None after handshake |
+| Server connections | 1 per poll cycle | 1 per client | 1 per client |
+| Best for | Status checks | Low-frequency events (Drive sync) | Chat, gaming, live feeds |
+
+### Multi-Device Sync with cur_max_message_id
+When a user has multiple devices (phone + laptop + tablet), each device maintains its own cursor to avoid downloading the same messages twice:
+
+```mermaid
+sequenceDiagram
+    participant Phone
+    participant Laptop
+    participant ChatServer
+    participant Cassandra
+
+    Note over Phone,Laptop: User has two devices; both connected via WebSocket
+
+    Note over Phone: cur_max_message_id = 100
+    Note over Laptop: cur_max_message_id = 98 (was offline briefly)
+
+    Note over Cassandra: Messages 99, 100, 101, 102 exist
+
+    Phone->>ChatServer: Connect (device=phone, cursor=100)
+    ChatServer->>Cassandra: SELECT WHERE recipient_id=42\n AND message_id > 100
+    Cassandra-->>ChatServer: [msg_101, msg_102]
+    ChatServer-->>Phone: Deliver msgs 101, 102
+
+    Laptop->>ChatServer: Connect (device=laptop, cursor=98)
+    ChatServer->>Cassandra: SELECT WHERE recipient_id=42\n AND message_id > 98
+    Cassandra-->>ChatServer: [msg_99, msg_100, msg_101, msg_102]
+    ChatServer-->>Laptop: Deliver msgs 99-102
+
+    Note over Phone,Laptop: Each device catches up independently\nfrom its own cursor — no coordination needed
+```
+
+The cursor approach means reconnection is trivially correct: each device fetches exactly the messages it missed, regardless of how long it was offline.
+
+### Group Chat Message Fan-Out
+For groups up to ~100 members, the server uses per-user message sync queues — each member gets the message independently rather than reading from a shared feed:
+
+```mermaid
+sequenceDiagram
+    participant UserA
+    participant CS1 as Chat Server 1
+    participant Cassandra
+    participant MQ as Message Queue
+    participant CS2 as Chat Server 2
+    participant CS3 as Chat Server 3
+    participant UserB as User B (online, CS2)
+    participant UserC as User C (offline, no CS)
+
+    UserA->>CS1: "Hello group G" (group_id=G, 50 members)
+    CS1->>Cassandra: Save message once (message_id=M1, group_id=G)
+    CS1->>MQ: Publish {message_id: M1, recipients: [B, C, D, ...49 members]}
+    
+    Note over MQ: Fan-out: one event per recipient
+    MQ->>CS2: {to: UserB, message_id: M1}
+    MQ->>CS3: {to: UserD, message_id: M1}
+    
+    CS2->>Cassandra: Fetch M1 content
+    CS2->>UserB: Deliver via WebSocket
+
+    Note over UserC: User C is offline — no active chat server
+    MQ->>CS1: {to: UserC, message_id: M1}
+    CS1->>CS1: Presence check: C is offline
+    CS1->>NotifService: Push notification for C (message preview)
+```
+
+The message is **written to Cassandra once** regardless of group size. What fans out is only the routing event (a message ID). This keeps fan-out cost proportional to recipient count but storage cost O(1) per message.
+
+### Presence Service — Full Lifecycle
+```mermaid
+sequenceDiagram
+    participant Client
+    participant ChatServer
+    participant PresenceKV as Presence KV Store
+    participant PubSub as Redis Pub/Sub
+    participant FriendA
+    participant FriendB
+
+    Note over Client,FriendB: USER COMES ONLINE
+
+    Client->>ChatServer: WebSocket connect (user_id=42)
+    ChatServer->>PresenceKV: SET user:42:status online\n SET user:42:last_active NOW
+    ChatServer->>PubSub: PUBLISH channel:42:presence {status: online}
+    PubSub->>FriendA: {user: 42, status: online}
+    PubSub->>FriendB: {user: 42, status: online}
+
+    loop Every 5 seconds
+        Client->>ChatServer: Heartbeat ping
+        ChatServer->>PresenceKV: SET user:42:last_active NOW
+    end
+
+    Note over Client,FriendB: USER GOES OFFLINE (no heartbeat for 30s)
+
+    PresenceKV->>PresenceKV: TTL expires (30s without update)
+    PresenceKV->>PubSub: PUBLISH channel:42:presence {status: offline}
+    PubSub->>FriendA: {user: 42, status: offline}
+    PubSub->>FriendB: {user: 42, status: offline}
+
+    Note over Client,FriendB: USER LOGS OUT EXPLICITLY
+
+    Client->>ChatServer: Logout request
+    ChatServer->>PresenceKV: SET user:42:status offline immediately
+    ChatServer->>PubSub: PUBLISH channel:42:presence {status: offline}
+```
+
+The distinction between timeout-based disconnect and explicit logout matters for the "last seen" timestamp. On explicit logout, the server writes the exact logout time. On timeout, the last heartbeat time approximates the last-active time.
+
 ## Architecture Diagrams
 
 ### High-Level Chat System Architecture

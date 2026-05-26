@@ -30,6 +30,96 @@ The trie is serialized periodically to object storage (S3) as a binary snapshot.
 ### Multi-Language and Multi-Region Support
 Each language or locale gets its own trie. When a request arrives, the server routes it to the correct trie based on the `Accept-Language` header or user settings. Regional tries differ even within a language: "football" autocomplete in the US differs from the UK. Separate tries per region allow each to reflect local search behavior independently.
 
+### Trie Structure Visualization
+A trie stores characters at each node. Every path from root to a terminal node spells a complete query. This example shows a trie built from the queries: "tree", "try", "true", "toy", "wish", "win":
+
+```mermaid
+graph TD
+    Root["(root)"] --> T["t"]
+    Root --> W["w"]
+
+    T --> TR["r"]
+    T --> TO["o"]
+
+    TR --> TRE["e"]
+    TR --> TRU["u"]
+    TR --> TRY["y ✓\n(query: 'try', freq: 35)"]
+
+    TRE --> TREE["e ✓\n(query: 'tree', freq: 28)"]
+    TRU --> TRUE["e ✓\n(query: 'true', freq: 15)"]
+    TO --> TOY["y ✓\n(query: 'toy', freq: 42)"]
+
+    W --> WI["i"]
+    WI --> WIN["n ✓\n(query: 'win', freq: 60)"]
+    WI --> WIS["s"]
+    WIS --> WISH["h ✓\n(query: 'wish', freq: 22)"]
+```
+
+Searching for prefix `"tr"`: traverse root → `t` → `r`, then collect all completions in the subtree under `r`. Without optimization, this requires visiting every node below `r`. With top-k pre-computation at `r`, the answer is already there.
+
+### Top-K Pre-Computation at Every Node
+Each node stores the k most popular completions reachable from it. The search never needs to traverse the subtree:
+
+```mermaid
+graph TD
+    Root["(root)\ntop-3: [win:60, toy:42, try:35]"] --> T["t\ntop-3: [toy:42, try:35, tree:28]"]
+    Root --> W["w\ntop-3: [win:60, wish:22]"]
+
+    T --> TR["r\ntop-3: [try:35, tree:28, true:15]"]
+    T --> TO["o\ntop-3: [toy:42]"]
+
+    TR --> TRE["e\ntop-3: [tree:28]"]
+    TR --> TRU["u\ntop-3: [true:15]"]
+    TR --> TRY["y ✓\nfreq:35"]
+
+    TRE --> TREE["e ✓\nfreq:28"]
+    TRU --> TRUE["e ✓\nfreq:15"]
+    TO --> TOY["y ✓\nfreq:42"]
+
+    W --> WI["i\ntop-3: [win:60, wish:22]"]
+    WI --> WIN["n ✓\nfreq:60"]
+    WI --> WIS["s\ntop-3: [wish:22]"]
+    WIS --> WISH["h ✓\nfreq:22"]
+```
+
+User types `"tr"` → traverse to node `r` → read pre-computed top-3: `[try:35, tree:28, true:15]` → done. No subtree traversal. Query time is O(prefix length), not O(subtree size).
+
+**Trade-off**: top-k pre-computation increases memory by k entries per node. For a trie with 1M nodes and k=5, each entry stores ~20 bytes: that's 100MB of pre-computed data for near-instant responses at every node.
+
+### Algorithm Complexity Comparison
+
+| Operation | Naive Trie | Pre-Computed Trie | SQL LIKE 'prefix%' |
+|-----------|-----------|-------------------|---------------------|
+| Lookup | O(p + subtree_size) | O(p) | O(log N) min, O(N) worst |
+| Ranking | O(K log K) sort at query time | O(1) — pre-sorted | Extra ORDER BY needed |
+| Memory | O(nodes) | O(nodes × k) | O(rows × row_size) |
+| Update frequency | At query time | At trie rebuild time | Real-time |
+| At 10B queries | Too slow | Sub-100ms | Too slow |
+
+`p` = prefix length (typically 1–20 characters). Subtree size can be millions of nodes for single-character prefixes like `"a"`.
+
+### Trie Update: Batch Rebuild vs Incremental Update
+
+```mermaid
+flowchart LR
+    subgraph Batch["Weekly Batch Rebuild (current approach)"]
+        B1["Aggregate 7 days\nof search logs"] --> B2["Compute global frequencies\n{twitter: 14M, twitch: 8M ...}"]
+        B2 --> B3["Build full trie from scratch\n(top-k at every node)"]
+        B3 --> B4["Serialize to S3\n(binary snapshot)"]
+        B4 --> B5["Query servers load new snapshot\n(atomic swap — no downtime)"]
+    end
+
+    subgraph Incremental["Near-Real-Time Updates (optional)"]
+        I1["New search event"] --> I2["Kafka stream"]
+        I2 --> I3["Flink sliding window\n(10-minute aggregate)"]
+        I3 --> I4["Update frequency for affected query\nin frequency table"]
+        I4 --> I5["Identify nodes whose top-k changes"]
+        I5 --> I6["Update those nodes only\n(in-place trie mutation)"]
+    end
+```
+
+The batch approach is simpler but means trending queries can take up to 7 days to appear in suggestions. The incremental approach reduces lag to minutes but requires locking or copy-on-write to safely mutate the in-memory trie without serving stale data during an update.
+
 ## Architecture Diagrams
 
 ### High-Level Autocomplete Architecture

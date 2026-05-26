@@ -117,6 +117,74 @@ Each pipeline component has a defined failure strategy:
 - **Metadata DB master down**: promote a slave to master; bring up a new slave
 - **Metadata DB slave down**: redirect reads to a healthy slave; bring up a replacement
 
+### Pre-Signed URL Upload Flow (Full Protocol Detail)
+The pre-signed URL pattern keeps raw video bytes entirely off the API tier. Here is the exact sequence including what data goes where:
+
+```mermaid
+sequenceDiagram
+    participant Uploader as Creator (browser/app)
+    participant APIServer
+    participant S3 as Amazon S3
+    participant TranscodeQueue as Message Queue
+    participant Pipeline as Transcoding Pipeline
+
+    Uploader->>APIServer: POST /v1/upload\n{title, description, category, file_size}
+    APIServer->>APIServer: Validate auth token
+    APIServer->>S3: GeneratePresignedUrl(\n  bucket=raw-videos,\n  key=uploads/{video_id}.mp4,\n  expiry=3600s,\n  method=PUT\n)
+    S3-->>APIServer: https://s3.amazonaws.com/raw-videos/\nuploads/{video_id}.mp4?X-Amz-Signature=...&X-Amz-Expires=3600
+
+    APIServer->>DB: INSERT video (id, title, status=pending, uploader_id)
+    APIServer-->>Uploader: {upload_url: "https://s3...", video_id: "v123"}
+
+    Note over Uploader,S3: Client splits file into GOP chunks (~5-10s each)\nUploads each chunk in parallel using S3 multipart upload
+    Uploader->>S3: PUT {upload_url} — chunk 1 of 10 (Content-Type: video/mp4)
+    Uploader->>S3: PUT {upload_url} — chunk 2 of 10
+    Uploader->>S3: PUT {upload_url} — chunk N of 10
+    S3->>S3: Assemble chunks when all parts received
+    S3-->>Uploader: 200 OK (each chunk)
+    
+    S3->>TranscodeQueue: Event: ObjectCreated (key=uploads/v123.mp4)
+    TranscodeQueue->>Pipeline: Trigger transcoding for v123
+    Pipeline->>DB: UPDATE video SET status=processing WHERE id=v123
+```
+
+The uploader never sends video bytes to your servers. S3 handles the incoming bandwidth. If the upload is interrupted, S3's multipart upload API allows resuming from the last completed chunk using the `UploadId` returned when the multipart session was initiated.
+
+### GOP-Aligned Multipart: How Resumable Uploads Work
+```mermaid
+flowchart TD
+    subgraph Client["Client-Side"]
+        Split["Split video into GOP chunks\n(each chunk = independently playable 5-10s segment)"]
+        Split --> TryUpload["Upload all chunks in parallel\n(S3 multipart API)"]
+    end
+
+    TryUpload --> OK{All chunks\nuploaded?}
+    OK -->|Yes| Complete["Send CompleteMultipartUpload\nS3 assembles the full file"]
+    OK -->|No — network drop| Resume["Client detects failure\nQuery S3 for ListParts\n(which chunks already landed?)"]
+    Resume --> Retry["Re-upload only missing chunks\n(completed chunks already in S3)"]
+    Retry --> OK
+
+    Complete --> S3["S3: full raw video ready\n→ trigger transcoding event"]
+```
+
+Without GOP alignment, a 1GB upload drop at chunk 9 of 10 would require restarting from zero. With GOP alignment, only the in-flight chunks at the moment of failure need to be retried — the rest are durably stored in S3 already.
+
+### Video Content Protection — Three Models
+```mermaid
+flowchart TD
+    Request["User requests to watch video_id=789"] --> AuthCheck["API server validates\nuser subscription / purchase"]
+    
+    AuthCheck --> Model{Content\nprotection model?}
+
+    Model -->|"DRM (premium content)"| DRM["1. Server returns video URL + license server URL\n2. Player requests decryption key from license server\n3. License server checks user entitlement\n4. Returns time-limited decryption key\n5. Player decrypts segments in hardware-protected memory\n(Apple FairPlay / Google Widevine / Microsoft PlayReady)"]
+
+    Model -->|"AES encryption"| AES["1. Video segments stored AES-encrypted in S3/CDN\n2. Player fetches encrypted segment\n3. Player requests key from key server with auth token\n4. Key server validates token → returns AES key\n5. Player decrypts in software\n(simpler, less secure — keys can be extracted from memory)"]
+
+    Model -->|"Visual watermark"| WM["1. Each encoded video has visible watermark\n   (channel logo, user ID for personalized watermarks)\n2. If video is leaked/pirated, watermark identifies\n   source account or session\n3. No encryption — used for accountability\n   not access control"]
+```
+
+DRM is the strongest protection but requires platform-specific SDKs (FairPlay is iOS-only, Widevine covers Android + Chrome). AES is simpler and cross-platform but software keys can be extracted by determined attackers. Most platforms use DRM for premium content and AES for standard content.
+
 ## Architecture Diagrams
 
 ### High-Level YouTube Architecture

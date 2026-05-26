@@ -141,6 +141,122 @@ Device tokens are not permanent. When a user uninstalls the app:
 
 Workers must detect these responses and **immediately delete** the invalid token from the device table to prevent wasting resources on future sends. Failing to clean up stale tokens degrades deliverability metrics and wastes compute.
 
+### Notification Lifecycle State Machine
+Every notification travels through a defined set of states from creation to final user interaction. Tracking these states enables debugging, retry logic, and product analytics:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: Notification event created\n(event_id assigned, saved to DB)
+    Pending --> Sent: Worker calls provider\n(APNs / FCM / Twilio / SendGrid)\nProvider returns 200 OK
+    Pending --> Failed: Provider error after\nall retries exhausted\n→ move to DLQ
+    Sent --> Delivered: OS delivers notification\nto device (confirmed by SDK callback\nor delivery receipt)
+    Sent --> Bounced: Invalid device token\n(APNs 410 Gone / FCM not-registered)\n→ delete token from device table
+    Delivered --> Clicked: User taps notification\n(SDK callback / click-through URL)
+    Delivered --> Dismissed: User swipes away
+    Delivered --> Unsubscribed: User opts out from\nnotification settings
+    Failed --> [*]: Alert fires to on-call\nDLQ for manual replay
+    Clicked --> [*]: Analytics event recorded\n(engagement metric)
+    Dismissed --> [*]: No action
+    Unsubscribed --> [*]: opt_in = false written to DB
+```
+
+State transitions are the basis for product metrics: sent-to-delivered rate tells you provider health; delivered-to-clicked is the engagement metric; delivered-to-unsubscribed signals spam fatigue.
+
+### Per-Channel Communication Protocols
+Each delivery channel has a different protocol and payload format. Workers must implement each separately.
+
+#### iOS (APNs) Communication
+```mermaid
+sequenceDiagram
+    participant Worker as iOS Worker
+    participant APNs as Apple Push Notification Service
+    participant iPhone
+
+    Note over Worker: Has device_token + JSON payload
+    Worker->>APNs: HTTP/2 POST /3/device/{device_token}\nHeaders: apns-topic, apns-priority, authorization (JWT)\nBody: {"aps":{"alert":{"title":"...","body":"..."},"badge":9}}
+    
+    alt Success
+        APNs-->>Worker: 200 OK
+        APNs->>iPhone: Push notification delivered
+        Worker->>DB: UPDATE status=sent
+    else Invalid token
+        APNs-->>Worker: 410 Gone\n{"reason": "Unregistered"}
+        Worker->>DB: DELETE FROM device WHERE device_token=...
+    else Provider error
+        APNs-->>Worker: 500 / 503
+        Worker->>Worker: Retry with exponential backoff\n(1s → 2s → 4s → DLQ)
+    end
+```
+
+APNs uses HTTP/2 with a persistent connection — workers maintain a connection pool to avoid TLS handshake overhead on every notification.
+
+#### Android (FCM) Communication
+```mermaid
+sequenceDiagram
+    participant Worker as Android Worker
+    participant FCM as Firebase Cloud Messaging
+    participant Android
+
+    Worker->>FCM: POST https://fcm.googleapis.com/fcm/send\nAuthorization: key=<server_key>\nBody: {"to": "<registration_token>",\n "notification": {"title":"...", "body":"..."},\n "data": {"order_id": "12345"}}
+    
+    alt Success
+        FCM-->>Worker: {"success": 1, "message_id": "..."}
+        FCM->>Android: Push delivered
+        Worker->>DB: UPDATE status=sent
+    else Stale token
+        FCM-->>Worker: {"failure": 1,\n "results": [{"error": "NotRegistered"}]}
+        Worker->>DB: DELETE stale token
+    end
+```
+
+FCM supports two message types: **notification messages** (displayed automatically by the OS) and **data messages** (delivered silently to the app for custom handling). The payload structure differs for each.
+
+#### SMS (Twilio) Communication
+```mermaid
+sequenceDiagram
+    participant Worker as SMS Worker
+    participant Twilio
+    participant Phone
+
+    Worker->>Twilio: POST https://api.twilio.com/2010-04-01/Accounts/{AccountSid}/Messages.json\nBasic Auth: AccountSid:AuthToken\nBody: To=+14155552671&From=+14155552672&Body=Your+order+shipped
+
+    alt Success
+        Twilio-->>Worker: 201 Created\n{"status": "queued", "sid": "SMxxxxxxx"}
+        Note over Twilio,Phone: Twilio handles carrier routing
+        Twilio->>Phone: SMS delivered
+        Worker->>DB: UPDATE status=sent
+    else Invalid number
+        Twilio-->>Worker: 400 Bad Request\n{"code": 21211, "message": "Invalid To number"}
+        Worker->>DB: UPDATE status=invalid
+    end
+```
+
+SMS has per-message cost and regulatory constraints (TCPA in the US, GDPR in EU). Workers must not retry SMS blindly — delivery failure codes must distinguish transient errors from permanent ones (invalid number = never retry).
+
+#### Email (SendGrid) Communication
+```mermaid
+sequenceDiagram
+    participant Worker as Email Worker
+    participant SendGrid
+    participant Inbox
+
+    Worker->>SendGrid: POST https://api.sendgrid.com/v3/mail/send\nAuthorization: Bearer <API_KEY>\nBody: {"personalizations":[{"to":[{"email":"user@example.com"}]}],\n "from":{"email":"noreply@example.com"},\n "subject":"Your order shipped",\n "content":[{"type":"text/html","value":"<html>..."}]}
+
+    alt Delivered
+        SendGrid-->>Worker: 202 Accepted
+        Note over SendGrid: Handles spam filtering,\nbounce management, delivery tracking
+        SendGrid->>Inbox: Email delivered
+    else Hard bounce (invalid email)
+        SendGrid-->>Worker: Webhook: {event:"bounce", type:"permanent"}
+        Worker->>DB: Mark email as invalid,\nsuppress future sends
+    else Spam complaint
+        SendGrid-->>Worker: Webhook: {event:"spamreport"}
+        Worker->>DB: Set opt_in=false for email channel
+    end
+```
+
+Email uses **webhooks** (not synchronous responses) for delivery confirmation. Workers must expose an endpoint to receive these async callbacks from SendGrid and update the notification log accordingly.
+
 ## Architecture Diagrams
 
 ### High-Level Notification System Architecture (Improved)
@@ -273,6 +389,69 @@ graph LR
 ```
 
 A queue that's growing means workers can't keep up. This could be due to: a provider outage, insufficient workers, or an unusual spike in notification volume. The queue depth metric is the earliest warning signal — long before users notice delays.
+
+### Notification System Improved Design — Component Map
+
+The improved design (from the initial single-server sketch) adds five critical elements: authentication, rate limiting, notification templates, analytics/tracking, and the retry/DLQ path. This diagram maps every component to its responsibility:
+
+```mermaid
+graph TD
+    subgraph Triggers["Triggering Services"]
+        BS["Billing Service"]
+        BookS["Booking Service"]
+        MktS["Marketing Service"]
+    end
+
+    subgraph NS["Notification Servers (per request)"]
+        Auth["1. Authenticate request\n(appKey + appSecret)"]
+        Pref["2. Check user opt-in\n(notification settings table)"]
+        Rate["3. Check rate limit\n(Redis counter with TTL)"]
+        Tmpl["4. Apply template\n(render parameterized content)"]
+        Enq["5. Enqueue to channel queue"]
+    end
+
+    subgraph Storage["Storage Layer"]
+        Cache["Redis Cache\n(user info, device tokens, templates)"]
+        DB["User DB\n(device tokens, settings)"]
+        Log["Notification Log DB\n(status: pending → sent)"]
+    end
+
+    subgraph Queues["Per-Channel Queues"]
+        iOSQ["iOS Queue"]
+        DroidQ["Android Queue"]
+        SMSQ["SMS Queue"]
+        EmailQ["Email Queue"]
+    end
+
+    subgraph Workers["Workers (per channel)"]
+        iOSW["iOS Workers\n(dedup check → APNs)"]
+        DroidW["Android Workers\n(dedup check → FCM)"]
+        SMSW["SMS Workers\n(dedup check → Twilio)"]
+        EmailW["Email Workers\n(dedup check → SendGrid)"]
+    end
+
+    subgraph Reliability["Reliability"]
+        Redis["Redis SET\n(processed event_ids)"]
+        DLQ["Dead Letter Queue\n(exhausted retries)"]
+        Alert["On-Call Alert"]
+    end
+
+    Triggers --> Auth
+    Auth --> Pref
+    Pref --> Rate
+    Rate --> Tmpl
+    Tmpl --> Enq
+    Enq --> Queues
+    NS <--> Cache
+    NS <--> DB
+    Queues --> Workers
+    Workers --> Redis
+    Workers --> Log
+    Workers --> DLQ
+    DLQ --> Alert
+```
+
+The key insight: notification servers are **stateless validators and routers**. They enforce business rules (auth, opt-in, rate limits) and then immediately hand off to a queue. Workers handle the stateful retry logic and provider calls.
 
 ## Interview Questions
 
