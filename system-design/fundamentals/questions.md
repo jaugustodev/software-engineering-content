@@ -153,19 +153,26 @@ graph TD
 
 ## Explain Load Balancer
 
-Distributes incoming traffic across multiple servers to improve scalability and availability. Prevents any single server from being overwhelmed. If a server fails, the load balancer stops sending traffic to it.
+Distributes incoming traffic across multiple servers to improve **scalability**, **availability**, and **security**. Prevents any single server from being overwhelmed — whether by legitimate traffic spikes or DDoS attacks — and removes failed servers from rotation automatically via health checks.
 
-**Common algorithms:**
+Load balancers exist at multiple tiers: **frontend** (DNS / anycast / CDN routing users to the nearest region), **backend** (NGINX / ALB in front of app servers), and **database** (PgBouncer / RDS Proxy for connection pooling and read/write splitting).
 
-- **Round Robin** — distributes requests in sequence: S1, S2, S3, S1… Simplest option; works well when all servers are equal.
-- **Least Connections** — sends the request to whichever server is least busy. Better when requests take different amounts of time (e.g., file uploads vs. quick API calls).
-- **IP Hash** — the same client always goes to the same server, based on their IP. Used when the server holds session state locally (not recommended — prefer external session storage).
+**Algorithms — quick reference:**
 
-**Technologies:**
+| Family | Algorithm | When to use |
+|---|---|---|
+| Static | Round Robin | Homogeneous servers, uniform requests |
+| Static | Weighted Round Robin | Heterogeneous fleet, canary deploys |
+| Static | IP Hash | Sticky sessions for legacy stateful apps |
+| Static | URL Hash | Cache locality (CDN sharding) |
+| Dynamic | Least Connections | Mixed-cost requests (uploads + quick APIs) |
+| Dynamic | Least Response Time | Latency-sensitive APIs |
 
-- **NGINX / HAProxy** — software load balancers you run yourself. Standard choice for on-premise or custom setups.
-- **AWS ALB** — managed load balancer on AWS. Can route by URL path (`/api` → service A, `/images` → service B). Most common for cloud apps.
-- **Cloudflare** — sits in front of everything, at the DNS level. Routes users to the nearest server globally before the request even reaches your infrastructure.
+**Key capabilities:** health checks, dynamic provisioning (autoscaling integration), TLS termination, rate limiting / WAF / DDoS mitigation.
+
+**Technologies:** NGINX, HAProxy, AWS ALB / NLB, Cloudflare, Envoy, PgBouncer.
+
+> **Deep dive:** [architecture/load-balancer](../../architecture/load-balancer/README.md) — full breakdown of where LBs live (frontend / backend / DB tiers), static vs dynamic algorithms, stateful vs stateless connections, TLS termination, DDoS prevention, and Layer 4 vs Layer 7.
 
 > **Connects to:** [Scalability](#what-is-scalability) — horizontal scaling requires a load balancer. [Stateless vs Stateful](#stateless-vs-stateful) — stateless apps allow true round-robin without session pinning. [API Gateway](#what-is-api-gateway-vs-load-balancer) — gateway sits above the load balancer in a microservice stack.
 
